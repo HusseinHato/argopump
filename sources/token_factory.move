@@ -57,6 +57,13 @@ module BullPump::token_factory {
         total_mint_fee: u64
     }
 
+    #[event]
+    struct BurnFAEvent has store, drop {
+        fa_obj: Object<Metadata>,
+        amount: u64,
+        burner_addr: address
+    }
+
     /// Unique per FA
     struct FAController has key {
         mint_ref: fungible_asset::MintRef,
@@ -233,7 +240,10 @@ module BullPump::token_factory {
 
     public entry fun burn_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
-    ) acquires FAController, FAConfig, Config {}
+    ) acquires FAController, FAConfig, Config {
+        let sender_addr = signer::address_of(sender);
+        burn_fa_internal(fa_obj, sender, amount);
+    }
 
     // ================================= View Functions ================================== //
 
@@ -304,6 +314,23 @@ module BullPump::token_factory {
             MintFAEvent { fa_obj, amount, recipient_addr: sender_addr, total_mint_fee }
         );
     } 
+
+    fun burn_fa_internal(
+        fa_obj: Object<Metadata>,
+        sender: &signer,
+        amount: u64
+    ) acquires FAController {
+        let sender_addr = signer::address_of(sender);
+        let fa_obj_addr = object::object_address(&fa_obj);
+
+        let fa_controller = borrow_global<FAController>(fa_obj_addr);
+
+        primary_fungible_store::burn(&fa_controller.burn_ref, sender_addr, amount);
+
+        event::emit(
+            BurnFAEvent { fa_obj, amount, burner_addr: sender_addr }
+        );
+    }
 
     /// Check mint limit and update mint tracker
     fun check_mint_limit_and_update_mint_tracker(
