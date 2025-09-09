@@ -1,0 +1,335 @@
+module BullPump::token_factory {
+    use std::option::{Self, Option};
+    use std::signer;
+    use std::string::String;
+    use std::vector;
+
+    #[test_only]
+    use std::string;
+    use std::debug;
+
+    use aptos_std::table::{Self, Table};
+
+    use aptos_framework::aptos_account;
+    use aptos_framework::event;
+    use aptos_framework::fungible_asset::{Self, Metadata};
+    use aptos_framework::object::{Self, Object, ObjectCore};
+    use aptos_framework::primary_fungible_store;
+
+    /// Only admin can update creator
+    const EONLY_ADMIN_CAN_UPDATE_CREATOR: u64 = 1;
+    /// Only admin can set pending admin
+    const EONLY_ADMIN_CAN_SET_PENDING_ADMIN: u64 = 2;
+    /// Sender is not pending admin
+    const ENOT_PENDING_ADMIN: u64 = 3;
+    /// Only admin can update mint fee collector
+    const EONLY_ADMIN_CAN_UPDATE_MINT_FEE_COLLECTOR: u64 = 4;
+    /// No mint limit
+    const ENO_MINT_LIMIT: u64 = 5;
+    /// Mint limit reached
+    const EMINT_LIMIT_REACHED: u64 = 6;
+
+    /// Default to mint 0 amount to creator when creating FA
+    const DEFAULT_PRE_MINT_AMOUNT: u64 = 0;
+    /// Default mint fee per smallest unit of FA denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
+    const DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA: u64 = 0;
+
+    #[event]
+    struct CreateFAEvent has store, drop {
+        creator_addr: address,
+        fa_obj: Object<Metadata>,
+        max_supply: Option<u128>,
+        name: String,
+        symbol: String,
+        decimals: u8,
+        icon_uri: String,
+        project_uri: String,
+        mint_fee_per_smallest_unit_of_fa: u64,
+        pre_mint_amount: u64,
+        mint_limit_per_addr: Option<u64>
+    }
+
+    #[event]
+    struct MintFAEvent has store, drop {
+        fa_obj: Object<Metadata>,
+        amount: u64,
+        recipient_addr: address,
+        total_mint_fee: u64
+    }
+
+    /// Unique per FA
+    struct FAController has key {
+        mint_ref: fungible_asset::MintRef,
+        burn_ref: fungible_asset::BurnRef,
+        transfer_ref: fungible_asset::TransferRef
+    }
+
+    /// Unique per FA
+    struct MintLimit has store {
+        limit: u64,
+        mint_tracker: Table<address, u64>
+    }
+
+    /// Unique per FA
+    struct FAConfig has key {
+        // Mint fee per FA denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
+        mint_fee_per_smallest_unit_of_fa: u64,
+        mint_limit: Option<MintLimit>
+    }
+
+    /// Global PerContract
+    struct Registry has key {
+        fa_objects: vector<Object<Metadata>>
+    }
+
+    /// Global per contract
+    struct Config has key {
+        // admin can set pending admin, accept admin, update mint fee collector
+        admin_addr: address,
+        pending_admin_addr: Option<address>,
+        mint_fee_collector_addr: address
+    }
+
+    /// If you deploy the module under an object, sender is the object's signer
+    /// If you deploy the moduelr under your own account, sender is your account's signer
+    fun init_module(sender: &signer) {
+        move_to(sender, Registry {fa_objects: vector::empty()});
+        move_to(
+            sender,
+            Config {
+                admin_addr: signer::address_of(sender),
+                pending_admin_addr: option::none(),
+                mint_fee_collector_addr: signer::address_of(sender)
+            }
+        );
+    }
+
+    // ================================= Entry Functions ================================= //
+
+    /// Set pending admin of the contract, then pending admin can call accept_admin to becom admin
+    public entry fun set_pending_admin(sender: &signer, new_admin: address) acquires Config {
+        let sender_addr = signer::address_of(sender);
+        let config = borrow_global_mut<Config>(@BullPump);
+        assert!(is_admin(config, sender_addr), EONLY_ADMIN_CAN_SET_PENDING_ADMIN);
+        config.pending_admin_addr = option::some(new_admin);
+    }
+
+    public entry fun accept_admin(sender: &signer) acquires Config {
+        let sender_addr = signer::address_of(sender);
+        let config = borrow_global_mut<Config>(@BullPump);
+        assert!(
+            config.pending_admin_addr == option::some(sender_addr), ENOT_PENDING_ADMIN
+        );
+        config.admin_addr = sender_addr;
+        config.pending_admin_addr = option::none();
+    }
+
+    /// Update mint fee collector address
+    public entry fun update_mint_fee_collector(sender: &signer, new_mint_fee_collector: address) acquires Config {
+        let sender_addr = signer::address_of(sender);
+        let config = borrow_global_mut<Config>(@BullPump);
+        assert!(
+            is_admin(config, sender_addr), EONLY_ADMIN_CAN_UPDATE_MINT_FEE_COLLECTOR
+        );
+        config.mint_fee_collector_addr = new_mint_fee_collector;
+    }
+
+    /// Create a fungible asset, only admin or creator can create FA
+    public entry fun create_fa(
+        sender: &signer,
+        max_supply: Option<u128>,
+        name: String,
+        symbol: String,
+        // Numver of decimal places, i.e APT has 8 decimal places, so decimals = 8, 1 APT = 1e-8 oapt
+        decimals: u8,
+        icon_uri: String,
+        project_uri: String,
+        // Mint fee per smallest unit of FA denominated in oapt (smallest unit of APT, i.e. 1e-* APT)
+        mint_fee_per_smallest_unit_of_fa: Option<u64>,
+        // Amount in smallest unit of FA
+        pre_mint_amount: Option<u64>,
+        // Limit of minting per addres in smallest unit of FA
+        mint_limit_per_addr: Option<u64>
+    ) acquires Registry, FAController {
+        let sender_addr = signer::address_of(sender);
+
+        let fa_obj_constructor_ref = &object::create_sticky_object(@BullPump);
+        let fa_obj_signer = &object::generate_signer(fa_obj_constructor_ref);
+
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            fa_obj_constructor_ref,
+            max_supply,
+            name,
+            symbol,
+            decimals,
+            icon_uri,
+            project_uri
+        );
+        let fa_obj = object::object_from_constructor_ref(fa_obj_constructor_ref);
+        let mint_ref = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
+        let burn_ref = fungible_asset::generate_burn_ref(fa_obj_constructor_ref);
+        let transfer_ref = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
+        move_to(
+            fa_obj_signer,
+            FAController { mint_ref, burn_ref, transfer_ref }
+        );
+
+        move_to(
+            fa_obj_signer,
+            FAConfig {
+                mint_fee_per_smallest_unit_of_fa: *mint_fee_per_smallest_unit_of_fa.borrow_with_default(
+                    &DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
+                ),
+                mint_limit: if (mint_limit_per_addr.is_some()) {
+                    option::some(
+                        MintLimit {
+                            limit: *mint_limit_per_addr.borrow(),
+                            mint_tracker: table::new()
+                        }
+                    )
+                } else { option::none() }
+            }
+        );
+
+        let registry = borrow_global_mut<Registry>(@BullPump);
+        registry.fa_objects.push_back(fa_obj);
+
+        event::emit(
+            CreateFAEvent {
+                creator_addr: sender_addr,
+                fa_obj,
+                max_supply,
+                name,
+                symbol,
+                decimals,
+                icon_uri,
+                project_uri,
+                mint_fee_per_smallest_unit_of_fa: *mint_fee_per_smallest_unit_of_fa.borrow_with_default(
+                    &DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
+                ),
+                pre_mint_amount: *pre_mint_amount.borrow_with_default(
+                    &DEFAULT_PRE_MINT_AMOUNT
+                ),
+                mint_limit_per_addr
+            }
+        );
+
+        if (*pre_mint_amount.borrow_with_default(&DEFAULT_PRE_MINT_AMOUNT) > 0) {
+            let amount = *pre_mint_amount.borrow();
+            mint_fa_internal(sender, fa_obj, amount, 0);
+        }
+    }
+
+    // Mint fungible asset, anyone with enough mint fee and has not reached mint limit can mint FA
+    public entry fun mint_fa(
+        sender: &signer, fa_obj: Object<Metadata>, amount: u64
+    ) acquires FAController, FAConfig, Config {
+        let sender_addr = signer::address_of(sender);
+        check_mint_limit_and_update_mint_tracker(sender_addr, fa_obj, amount);
+        let total_mint_fee = get_mint_fee(fa_obj, amount);
+        pay_for_mint(sender, total_mint_fee);
+        mint_fa_internal(sender, fa_obj, amount, total_mint_fee);
+    }
+
+    public entry fun burn_fa(
+        sender: &signer, fa_obj: Object<Metadata>, amount: u64
+    ) acquires FAController, FAConfig, Config {}
+
+    // ================================= View Functions ================================== //
+
+    #[view]
+    /// get all fungible assets created using this contract
+    public fun get_registry(): vector<Object<Metadata>> acquires Registry {
+        let registry = borrow_global<Registry>(@BullPump);
+        registry.fa_objects
+    }
+
+    #[view]
+    /// Get mint limit per address
+    public fun get_mint_limit(fa_obj: Object<Metadata>): Option<u64> acquires FAConfig {
+        let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
+        if (fa_config.mint_limit.is_some()) {
+            option::some(fa_config.mint_limit.borrow().limit)
+        } else { option::none() }
+    }
+
+    #[view]
+    /// Get current minted amount by an address
+    public fun get_current_minted_amount(
+        fa_obj: Object<Metadata>, addr: address
+    ): u64 acquires FAConfig {
+        let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
+        assert!(fa_config.mint_limit.is_some(), ENO_MINT_LIMIT);
+        let mint_limit = fa_config.mint_limit.borrow();
+        let mint_tracker = &mint_limit.mint_tracker;
+        *mint_tracker.borrow_with_default(addr, &0)
+    }
+
+    #[view]
+    public fun get_mint_fee(
+        fa_obj: Object<Metadata>,
+        amount: u64
+    ): u64 acquires FAConfig {
+        let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
+        amount * fa_config.mint_fee_per_smallest_unit_of_fa
+    }
+
+    // ================================= Helper Functions ================================== //
+
+    /// Check if sender is admin or owner of the object when package is published to object
+    fun is_admin(config: &Config, sender: address): bool {
+        if (sender == config.admin_addr) { true }
+        else {
+            if (object::is_object(@BullPump)) {
+                let obj = object::address_to_object<ObjectCore>(@BullPump);
+                object::is_owner(obj, sender)
+            } else { false }
+        }
+    }
+
+    /// ACtual implementation of minting FA
+    fun mint_fa_internal(
+        sender: &signer,
+        fa_obj: Object<Metadata>,
+        amount: u64,
+        total_mint_fee: u64
+    ) acquires FAController {
+        let sender_addr = signer::address_of(sender);
+        let fa_obj_addr = object::object_address(&fa_obj);
+
+        let fa_controller = borrow_global<FAController>(fa_obj_addr);
+        primary_fungible_store::mint(&fa_controller.mint_ref, sender_addr, amount);
+
+        event::emit(
+            MintFAEvent { fa_obj, amount, recipient_addr: sender_addr, total_mint_fee }
+        );
+    } 
+
+    /// Check mint limit and update mint tracker
+    fun check_mint_limit_and_update_mint_tracker(
+        sender: address, fa_obj: Object<Metadata>, amount: u64
+    ) acquires FAConfig {
+        let mint_limit = get_mint_limit(fa_obj);
+        if (mint_limit.is_some()) {
+            let old_amount = get_current_minted_amount(fa_obj, sender);
+            assert!(
+                old_amount + amount <= *mint_limit.borrow(),
+                EMINT_LIMIT_REACHED
+            );
+            let  fa_config = borrow_global_mut<FAConfig>(object::object_address(&fa_obj));
+            let mint_limit = fa_config.mint_limit.borrow_mut();
+            mint_limit.mint_tracker.upsert(sender, old_amount + amount)
+        }
+    }
+
+    /// Pay for mint
+    fun pay_for_mint(sender: &signer, total_mint_fee: u64) acquires Config {
+        if (total_mint_fee > 0) {
+            let config = borrow_global<Config>(@BullPump);
+            aptos_account::transfer(
+                sender, config.mint_fee_collector_addr, total_mint_fee
+            )
+        }
+    }
+
+}
