@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-BullPump = "_"
+BullPump = "d961d294208b5612a6bb17c88dc0ec23634fd89786574f84246fc39c54e12d1a"
 
 [dev-addresses]
 

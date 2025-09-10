@@ -28,6 +28,9 @@ module BullPump::token_factory {
     const ENO_MINT_LIMIT: u64 = 5;
     /// Mint limit reached
     const EMINT_LIMIT_REACHED: u64 = 6;
+    /// Not Enough Balance
+    const ENOT_ENOUGH_BALANCE: u64 = 7;
+
 
     /// Default to mint 0 amount to creator when creating FA
     const DEFAULT_PRE_MINT_AMOUNT: u64 = 0;
@@ -240,9 +243,11 @@ module BullPump::token_factory {
 
     public entry fun burn_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
-    ) acquires FAController, FAConfig, Config {
+    ) acquires FAController, FAConfig {
         let sender_addr = signer::address_of(sender);
+        check_user_fa_balance(fa_obj, sender_addr, amount);
         burn_fa_internal(fa_obj, sender, amount);
+        reduce_mint_tracker(fa_obj, sender_addr, amount);
     }
 
     // ================================= View Functions ================================== //
@@ -276,12 +281,53 @@ module BullPump::token_factory {
     }
 
     #[view]
+    /// Get mint fee denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
     public fun get_mint_fee(
         fa_obj: Object<Metadata>,
         amount: u64
     ): u64 acquires FAConfig {
         let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
         amount * fa_config.mint_fee_per_smallest_unit_of_fa
+    }
+
+
+    #[view]
+    /// Get contract admin
+    public fun get_admin(): address acquires Config {
+        let config = borrow_global<Config>(@BullPump);
+        config.admin_addr
+    }
+
+    #[view]
+    /// Get contract pending admin
+    public fun get_pending_admin(): Option<address> acquires Config {
+        let config = borrow_global<Config>(@BullPump);
+        config.pending_admin_addr
+    }
+
+    #[view]
+    /// Get mint fee collector address
+    public fun get_mint_fee_collector(): address acquires Config {
+        let config = borrow_global<Config>(@BullPump);
+        config.mint_fee_collector_addr
+    }
+
+    #[view]
+    /// Get FA Balance of an address
+    public fun get_balance_of_user(fa_obj: Object<Metadata>, addr: address): u64 {
+        primary_fungible_store::balance(addr, fa_obj)
+    }
+
+    #[view]
+    // get fungible asset Metadata
+    public fun get_fa_object_metadata(fa_obj: Object<Metadata>): (String, String, u8, Option<u128>, u64) {
+        let name = fungible_asset::name(fa_obj);
+        let symbol = fungible_asset::symbol(fa_obj);
+        let decimals = fungible_asset::decimals(fa_obj);
+        let max_supply = fungible_asset::maximum(fa_obj);
+        let circulating_supply = fungible_asset::balance(fa_obj);
+
+        (name, symbol, decimals, max_supply, circulating_supply)
     }
 
     // ================================= Helper Functions ================================== //
@@ -315,6 +361,7 @@ module BullPump::token_factory {
         );
     } 
 
+    /// Actual implementation of burning FA
     fun burn_fa_internal(
         fa_obj: Object<Metadata>,
         sender: &signer,
@@ -330,6 +377,34 @@ module BullPump::token_factory {
         event::emit(
             BurnFAEvent { fa_obj, amount, burner_addr: sender_addr }
         );
+    }
+
+    /// Check if user has enough FA balance
+    fun check_user_fa_balance(
+        fa_obj: Object<Metadata>,
+        sender: address,
+        amount: u64
+    ) {
+        assert!(
+            get_balance_of_user(fa_obj, sender) >= amount,
+            ENOT_ENOUGH_BALANCE
+        )
+    }
+
+    /// Reduce mint tracker
+    fun reduce_mint_tracker(
+        fa_obj: Object<Metadata>,
+        sender: address,
+        amount: u64
+    ) acquires FAConfig {
+        let mint_limit = get_mint_limit(fa_obj);
+        if (mint_limit.is_some()) {
+            let old_amount = get_current_minted_amount(fa_obj, sender);
+            let fa_config = borrow_global_mut<FAConfig>(object::object_address(&fa_obj));
+            let mint_limit = fa_config.mint_limit.borrow_mut();
+            let mint_tracker = &mut mint_limit.mint_tracker;
+            mint_tracker.upsert(sender, old_amount - amount);
+        };
     }
 
     /// Check mint limit and update mint tracker
@@ -359,4 +434,49 @@ module BullPump::token_factory {
         }
     }
 
+    // ================================= Unit Tests ================================== //
+
+    #[test_only]
+    use aptos_framework::aptos_coin;
+
+    #[test_only]
+    use aptos_framework::coin;
+
+    #[test_only]
+    use aptos_framework::account;
+
+    #[test(aptos_framework = @0x1, sender = @BullPump)]
+    fun test_happy_path(
+        aptos_framework: &signer, sender: &signer
+    ) acquires Registry, FAController, Config, FAConfig {
+        // let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
+
+        let sender_addr = signer::address_of(sender);
+
+        init_module(sender);
+
+        // create first FA
+
+        create_fa(
+            sender,
+            option::some(1000),
+            string::utf8(b"Test"),
+            string::utf8(b"TST"),
+            2,
+            string::utf8(b"icon_url"),
+            string::utf8(b"project_url"),
+            option::none(),
+            option::none(),
+            option::some(500)
+        );
+
+        let registry = get_registry();
+        let fa_1 = registry[registry.length() - 1];
+        assert!(fungible_asset::supply(fa_1) == option::some(0), 1);
+
+        mint_fa(sender, fa_1, 50);
+        let sender_balance = get_balance_of_user(fa_1, sender_addr);
+        assert!(fungible_asset::supply(fa_1) == option::some(50), 2);
+        assert!(sender_balance == 50, 3);
+    }
 }
