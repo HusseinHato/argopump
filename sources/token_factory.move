@@ -36,6 +36,10 @@ module BullPump::token_factory {
     const DEFAULT_PRE_MINT_AMOUNT: u64 = 0;
     /// Default mint fee per smallest unit of FA denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
     const DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA: u64 = 0;
+    /// Address of Bonding Curve contract
+    const BONDING_CURVE_POOL_ADDRESS: address = @BullPump;
+    /// Initial Supply of the FA created
+    const INITIAL_BONDING_CURVE_SUPPLY: u64 = 1_000_000_000_00000000; // 1 billion tokens with 8 decimal places
 
     #[event]
     struct CreateFAEvent has store, drop {
@@ -73,6 +77,9 @@ module BullPump::token_factory {
         burn_ref: fungible_asset::BurnRef,
         transfer_ref: fungible_asset::TransferRef
     }
+
+    /// Capability to create fungible asset, only admin or owner of the object can create FA
+    public struct FactoryCapability has store, drop {}
 
     /// Unique per FA
     struct MintLimit has store {
@@ -175,14 +182,25 @@ module BullPump::token_factory {
             icon_uri,
             project_uri
         );
+
         let fa_obj = object::object_from_constructor_ref(fa_obj_constructor_ref);
         let mint_ref = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
         let burn_ref = fungible_asset::generate_burn_ref(fa_obj_constructor_ref);
         let transfer_ref = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
+
         move_to(
             fa_obj_signer,
             FAController { mint_ref, burn_ref, transfer_ref }
         );
+
+        BullPump::bonding_curve_pool::initialize_pool(
+            sender,
+            fa_obj,
+            transfer_ref,
+            FactoryCapability {}
+        );
+
+        fungible_asset::mint(&mint_ref, INITIAL_BONDING_CURVE_SUPPLY);
 
         move_to(
             fa_obj_signer,
@@ -478,5 +496,27 @@ module BullPump::token_factory {
         let sender_balance = get_balance_of_user(fa_1, sender_addr);
         assert!(fungible_asset::supply(fa_1) == option::some(50), 2);
         assert!(sender_balance == 50, 3);
+
+        create_fa(
+            sender,
+            option::some(1000),
+            string::utf8(b"Test2"),
+            string::utf8(b"TST2"),
+            3,
+            string::utf8(b"icon_url2"),
+            string::utf8(b"project_url2"),
+            option::none(),
+            option::none(),
+            option::some(500)
+        );
+
+        let registry = get_registry();
+        let fa_2 = registry[registry.length() - 1];
+        assert!(fungible_asset::supply(fa_2) == option::some(0), 4);
+
+        mint_fa(sender, fa_2, 70);
+        let sender_balance = get_balance_of_user(fa_2, sender_addr);
+        assert!(fungible_asset::supply(fa_2) == option::some(70), 5);
+        assert!(sender_balance == 70, 6);
     }
 }
