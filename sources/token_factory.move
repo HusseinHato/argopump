@@ -6,9 +6,7 @@ module BullPump::token_factory {
 
     #[test_only]
     use std::string;
-    use std::debug;
-
-    use aptos_std::table::{Self, Table};
+    // use std::debug;
 
     use aptos_framework::aptos_account;
     use aptos_framework::event;
@@ -39,7 +37,9 @@ module BullPump::token_factory {
     /// Address of Bonding Curve contract
     const BONDING_CURVE_POOL_ADDRESS: address = @BullPump;
     /// Initial Supply of the FA created
-    const INITIAL_BONDING_CURVE_SUPPLY: u64 = 1_000_000_000_00000000; // 1 billion tokens with 8 decimal places
+    const INITIAL_BONDING_CURVE_SUPPLY: u128 = 1_000_000_000_00000000; // 1 billion tokens with 8 decimal places
+    /// Default number of decimal places for the FA created
+    const DEFAULT_DECIMALS: u8 = 8;
 
     #[event]
     struct CreateFAEvent has store, drop {
@@ -52,8 +52,6 @@ module BullPump::token_factory {
         icon_uri: String,
         project_uri: String,
         mint_fee_per_smallest_unit_of_fa: u64,
-        pre_mint_amount: u64,
-        mint_limit_per_addr: Option<u64>
     }
 
     #[event]
@@ -78,20 +76,10 @@ module BullPump::token_factory {
         transfer_ref: fungible_asset::TransferRef
     }
 
-    /// Capability to create fungible asset, only admin or owner of the object can create FA
-    public struct FactoryCapability has store, drop {}
-
-    /// Unique per FA
-    struct MintLimit has store {
-        limit: u64,
-        mint_tracker: Table<address, u64>
-    }
-
     /// Unique per FA
     struct FAConfig has key {
         // Mint fee per FA denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
         mint_fee_per_smallest_unit_of_fa: u64,
-        mint_limit: Option<MintLimit>
     }
 
     /// Global PerContract
@@ -154,20 +142,14 @@ module BullPump::token_factory {
     /// Create a fungible asset, only admin or creator can create FA
     public entry fun create_fa(
         sender: &signer,
-        max_supply: Option<u128>,
+        // max_supply: Option<u128>,
         name: String,
         symbol: String,
-        // Numver of decimal places, i.e APT has 8 decimal places, so decimals = 8, 1 APT = 1e-8 oapt
-        decimals: u8,
+        // Number of decimal places, i.e APT has 8 decimal places, so decimals = 8, 1 APT = 1e-8 oapt
+        // decimals: u8,
         icon_uri: String,
         project_uri: String,
-        // Mint fee per smallest unit of FA denominated in oapt (smallest unit of APT, i.e. 1e-* APT)
-        mint_fee_per_smallest_unit_of_fa: Option<u64>,
-        // Amount in smallest unit of FA
-        pre_mint_amount: Option<u64>,
-        // Limit of minting per addres in smallest unit of FA
-        mint_limit_per_addr: Option<u64>
-    ) acquires Registry, FAController {
+    ) acquires Registry {
         let sender_addr = signer::address_of(sender);
 
         let fa_obj_constructor_ref = &object::create_sticky_object(@BullPump);
@@ -175,47 +157,45 @@ module BullPump::token_factory {
 
         primary_fungible_store::create_primary_store_enabled_fungible_asset(
             fa_obj_constructor_ref,
-            max_supply,
+            option::some(INITIAL_BONDING_CURVE_SUPPLY),
             name,
             symbol,
-            decimals,
+            DEFAULT_DECIMALS,
             icon_uri,
             project_uri
         );
 
         let fa_obj = object::object_from_constructor_ref(fa_obj_constructor_ref);
         let mint_ref = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
+        let mint_ref_copy = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
         let burn_ref = fungible_asset::generate_burn_ref(fa_obj_constructor_ref);
         let transfer_ref = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
+        let transfer_ref_for_bonding_curve = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
+
+        BullPump::bonding_curve_pool::initialize_pool(
+            sender,
+            fa_obj,
+            transfer_ref_for_bonding_curve,
+        );
 
         move_to(
             fa_obj_signer,
             FAController { mint_ref, burn_ref, transfer_ref }
         );
 
-        BullPump::bonding_curve_pool::initialize_pool(
-            sender,
-            fa_obj,
-            transfer_ref,
-            FactoryCapability {}
+        let minted_tokens = fungible_asset::mint(&mint_ref_copy, (INITIAL_BONDING_CURVE_SUPPLY as u64));
+
+        let pooL_store = primary_fungible_store::ensure_primary_store_exists(
+            BONDING_CURVE_POOL_ADDRESS,
+            fa_obj
         );
 
-        fungible_asset::mint(&mint_ref, INITIAL_BONDING_CURVE_SUPPLY);
+        fungible_asset::deposit(pooL_store, minted_tokens);
 
         move_to(
             fa_obj_signer,
             FAConfig {
-                mint_fee_per_smallest_unit_of_fa: *mint_fee_per_smallest_unit_of_fa.borrow_with_default(
-                    &DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
-                ),
-                mint_limit: if (mint_limit_per_addr.is_some()) {
-                    option::some(
-                        MintLimit {
-                            limit: *mint_limit_per_addr.borrow(),
-                            mint_tracker: table::new()
-                        }
-                    )
-                } else { option::none() }
+                mint_fee_per_smallest_unit_of_fa: DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
             }
         );
 
@@ -226,34 +206,21 @@ module BullPump::token_factory {
             CreateFAEvent {
                 creator_addr: sender_addr,
                 fa_obj,
-                max_supply,
+                max_supply: option::some(INITIAL_BONDING_CURVE_SUPPLY),
                 name,
                 symbol,
-                decimals,
+                decimals: DEFAULT_DECIMALS,
                 icon_uri,
                 project_uri,
-                mint_fee_per_smallest_unit_of_fa: *mint_fee_per_smallest_unit_of_fa.borrow_with_default(
-                    &DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
-                ),
-                pre_mint_amount: *pre_mint_amount.borrow_with_default(
-                    &DEFAULT_PRE_MINT_AMOUNT
-                ),
-                mint_limit_per_addr
+                mint_fee_per_smallest_unit_of_fa: DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
             }
         );
-
-        if (*pre_mint_amount.borrow_with_default(&DEFAULT_PRE_MINT_AMOUNT) > 0) {
-            let amount = *pre_mint_amount.borrow();
-            mint_fa_internal(sender, fa_obj, amount, 0);
-        }
     }
 
     // Mint fungible asset, anyone with enough mint fee and has not reached mint limit can mint FA
     public entry fun mint_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
     ) acquires FAController, FAConfig, Config {
-        let sender_addr = signer::address_of(sender);
-        check_mint_limit_and_update_mint_tracker(sender_addr, fa_obj, amount);
         let total_mint_fee = get_mint_fee(fa_obj, amount);
         pay_for_mint(sender, total_mint_fee);
         mint_fa_internal(sender, fa_obj, amount, total_mint_fee);
@@ -261,11 +228,10 @@ module BullPump::token_factory {
 
     public entry fun burn_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
-    ) acquires FAController, FAConfig {
+    ) acquires FAController {
         let sender_addr = signer::address_of(sender);
         check_user_fa_balance(fa_obj, sender_addr, amount);
         burn_fa_internal(fa_obj, sender, amount);
-        reduce_mint_tracker(fa_obj, sender_addr, amount);
     }
 
     // ================================= View Functions ================================== //
@@ -275,27 +241,6 @@ module BullPump::token_factory {
     public fun get_registry(): vector<Object<Metadata>> acquires Registry {
         let registry = borrow_global<Registry>(@BullPump);
         registry.fa_objects
-    }
-
-    #[view]
-    /// Get mint limit per address
-    public fun get_mint_limit(fa_obj: Object<Metadata>): Option<u64> acquires FAConfig {
-        let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
-        if (fa_config.mint_limit.is_some()) {
-            option::some(fa_config.mint_limit.borrow().limit)
-        } else { option::none() }
-    }
-
-    #[view]
-    /// Get current minted amount by an address
-    public fun get_current_minted_amount(
-        fa_obj: Object<Metadata>, addr: address
-    ): u64 acquires FAConfig {
-        let fa_config = borrow_global<FAConfig>(object::object_address(&fa_obj));
-        assert!(fa_config.mint_limit.is_some(), ENO_MINT_LIMIT);
-        let mint_limit = fa_config.mint_limit.borrow();
-        let mint_tracker = &mint_limit.mint_tracker;
-        *mint_tracker.borrow_with_default(addr, &0)
     }
 
     #[view]
@@ -346,6 +291,12 @@ module BullPump::token_factory {
         let circulating_supply = fungible_asset::balance(fa_obj);
 
         (name, symbol, decimals, max_supply, circulating_supply)
+    }
+
+    #[view]
+    /// Get FA object address
+    public fun get_fa_object_address(fa_obj: Object<Metadata>): address {
+        object::object_address(&fa_obj)
     }
 
     // ================================= Helper Functions ================================== //
@@ -409,39 +360,6 @@ module BullPump::token_factory {
         )
     }
 
-    /// Reduce mint tracker
-    fun reduce_mint_tracker(
-        fa_obj: Object<Metadata>,
-        sender: address,
-        amount: u64
-    ) acquires FAConfig {
-        let mint_limit = get_mint_limit(fa_obj);
-        if (mint_limit.is_some()) {
-            let old_amount = get_current_minted_amount(fa_obj, sender);
-            let fa_config = borrow_global_mut<FAConfig>(object::object_address(&fa_obj));
-            let mint_limit = fa_config.mint_limit.borrow_mut();
-            let mint_tracker = &mut mint_limit.mint_tracker;
-            mint_tracker.upsert(sender, old_amount - amount);
-        };
-    }
-
-    /// Check mint limit and update mint tracker
-    fun check_mint_limit_and_update_mint_tracker(
-        sender: address, fa_obj: Object<Metadata>, amount: u64
-    ) acquires FAConfig {
-        let mint_limit = get_mint_limit(fa_obj);
-        if (mint_limit.is_some()) {
-            let old_amount = get_current_minted_amount(fa_obj, sender);
-            assert!(
-                old_amount + amount <= *mint_limit.borrow(),
-                EMINT_LIMIT_REACHED
-            );
-            let  fa_config = borrow_global_mut<FAConfig>(object::object_address(&fa_obj));
-            let mint_limit = fa_config.mint_limit.borrow_mut();
-            mint_limit.mint_tracker.upsert(sender, old_amount + amount)
-        }
-    }
-
     /// Pay for mint
     fun pay_for_mint(sender: &signer, total_mint_fee: u64) acquires Config {
         if (total_mint_fee > 0) {
@@ -454,69 +372,91 @@ module BullPump::token_factory {
 
     // ================================= Unit Tests ================================== //
 
+    #[test(sender = @BullPump)]
+    fun test_create_fa(
+        // aptos_framework: &signer,
+        sender: &signer
+    ) acquires Registry {
+
+        init_module(sender);
+
+        // create first FA
+        create_fa(
+            sender,
+            string::utf8(b"Test"),
+            string::utf8(b"TST"),
+            string::utf8(b"icon_url"),
+            string::utf8(b"project_url"),
+        );
+
+        let registry = get_registry();
+        let fa_1 = registry[registry.length() - 1];
+        assert!(fungible_asset::supply(fa_1) == option::some(INITIAL_BONDING_CURVE_SUPPLY), 1);
+    }
+
+    #[test_only]
+    use BullPump::bonding_curve_pool::{Self};
+    #[test_only]
+    use aptos_framework::account;
+    #[test_only]
+    use std::debug;
+
     #[test_only]
     use aptos_framework::aptos_coin;
 
     #[test_only]
     use aptos_framework::coin;
 
-    #[test_only]
-    use aptos_framework::account;
+    #[test(aptos_framework = @0x1, sender = @BullPump, alice = @0x2)]
+    fun test_set_up(
+        sender: &signer,
+        aptos_framework: &signer,
+        alice: &signer
+    ) acquires Registry {
 
-    #[test(aptos_framework = @0x1, sender = @BullPump)]
-    fun test_happy_path(
-        aptos_framework: &signer, sender: &signer
-    ) acquires Registry, FAController, Config, FAConfig {
-        // let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
-
-        let sender_addr = signer::address_of(sender);
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
 
         init_module(sender);
 
-        // create first FA
+        let creator_addr = signer::address_of(sender);
+
+        // Initialize token_factory module first
 
         create_fa(
             sender,
-            option::some(1000),
-            string::utf8(b"Test"),
-            string::utf8(b"TST"),
-            2,
-            string::utf8(b"icon_url"),
-            string::utf8(b"project_url"),
-            option::none(),
-            option::none(),
-            option::some(500)
-        );
-
-        let registry = get_registry();
-        let fa_1 = registry[registry.length() - 1];
-        assert!(fungible_asset::supply(fa_1) == option::some(0), 1);
-
-        mint_fa(sender, fa_1, 50);
-        let sender_balance = get_balance_of_user(fa_1, sender_addr);
-        assert!(fungible_asset::supply(fa_1) == option::some(50), 2);
-        assert!(sender_balance == 50, 3);
-
-        create_fa(
-            sender,
-            option::some(1000),
             string::utf8(b"Test2"),
             string::utf8(b"TST2"),
-            3,
-            string::utf8(b"icon_url2"),
-            string::utf8(b"project_url2"),
-            option::none(),
-            option::none(),
-            option::some(500)
+            string::utf8(b"icon_url"),
+            string::utf8(b"project_url"),
         );
 
         let registry = get_registry();
         let fa_2 = registry[registry.length() - 1];
-        assert!(fungible_asset::supply(fa_2) == option::some(0), 4);
+        let fa_2_address = get_fa_object_address(fa_2);
 
-        mint_fa(sender, fa_2, 70);
-        let sender_balance = get_balance_of_user(fa_2, sender_addr);
-        assert!(fungible_asset::supply(fa_2) == option::some(70), 5);
-        assert!(sender_balance == 70, 6);
+        let alice_addr = signer::address_of(alice);
+
+        account::create_account_for_test(alice_addr);
+        coin::register<aptos_coin::AptosCoin>(alice);
+
+        aptos_coin::mint(aptos_framework, alice_addr, 10_00000000);
+        // 10_00000000 oapt = 10 APT
+
+        bonding_curve_pool::buy_tokens(
+            alice,
+            fa_2_address,
+            1_00000000, // 1_00000000 oapt = 1 APT
+        );
+
+        debug::print(&string::utf8(b"alice TST2 balance: "));
+        debug::print(&bonding_curve_pool::get_token_balance(alice_addr, fa_2_address));
+        debug::print(&bonding_curve_pool::get_token_balance(creator_addr, fa_2_address));
+        debug::print(&bonding_curve_pool::get_apt_reserves(fa_2_address));
+
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+
     }
+
+    
 }
