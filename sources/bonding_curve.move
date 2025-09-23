@@ -4,9 +4,10 @@ module BullPump::bonding_curve_pool {
     use aptos_framework::coin::{Self, Coin};
     use aptos_framework::aptos_coin::AptosCoin;
     use aptos_framework::object::{Self, Object};
-    use aptos_framework::fungible_asset::{Self, Metadata, TransferRef};
+    use aptos_framework::fungible_asset::{Self, Metadata, TransferRef, BurnRef};
     use aptos_std::table::{Self, Table};
     use aptos_framework::primary_fungible_store;
+    use aptos_framework::event;
     // use std::debug;
 
     // Friend module to allow access to initialize_pool function
@@ -16,8 +17,8 @@ module BullPump::bonding_curve_pool {
     const TOKEN_FACTORY_ADDRESS: address = @BullPump;
 
     /// Virtual APT reserves to stabilize the curve.
-    const VIRTUAL_APT_RESERVES: u64 = 28_24_000000;
-    /// 28_24_000000 octas = 28.24 APT
+    const VIRTUAL_APT_RESERVES: u64 = 28_24_00000000;
+    /// 28_24_00000000 octas = 28.24 APT
 
     /// Graduation threshold in APT (in octas, 1 APT = 10^8 octas).
     const GRADUATION_THRESHOLD: u64 = 21_500_00000000; // 21500 APT
@@ -42,6 +43,25 @@ module BullPump::bonding_curve_pool {
     /// Error: zero input amount
     const EZERO_INPUT_AMOUNT: u64 = 4;
 
+    // --- Events ---
+
+    #[event]
+    struct TokenPurchaseEvent has copy, drop, store {
+        buyer: address,
+        fa_object: address,
+        apt_in: u64,
+        tokens_out: u64,
+    }
+
+    #[event]
+    struct TokenSaleEvent has copy, drop, store {
+        seller: address,
+        fa_object: address,
+        tokens_in: u64,
+        apt_out: u64,
+    }
+
+
     // --- Structs ---
 
     /// Store Pool data.
@@ -57,9 +77,14 @@ module BullPump::bonding_curve_pool {
         pools: Table<address, Pool>, // Key: FA object address, Value: Pool
     }
 
+    struct FungibleAssetRefs has store {
+        transfer_ref: TransferRef,
+        burn_ref: BurnRef,
+    }
+
     /// Resource to store delegated TransferRefs for each FA object.
     struct DelegatedRefs has key {
-        refs: Table<address, TransferRef>, // Key: FA object address, Value: TransferRef
+        refs: Table<address, FungibleAssetRefs>, // Key: FA object address, Value: TransferRef
     }
 
     /// This function is called by the Token Factory to initialize a new bonding curve pool.
@@ -67,6 +92,7 @@ module BullPump::bonding_curve_pool {
         sender: &signer,
         fa_obj: Object<Metadata>,
         transfer_ref: TransferRef,
+        burn_ref: BurnRef
     ) acquires AllPools, DelegatedRefs {
         // Initialize resources if not exists
         if (!exists<AllPools>(@BullPump)) {
@@ -88,9 +114,14 @@ module BullPump::bonding_curve_pool {
 
         all_pools_ref.pools.add(fa_obj_addr, new_pool);
 
+        let fungible_asset_refs = FungibleAssetRefs {
+            transfer_ref,
+            burn_ref,
+        };
+
         // Store the delegated TransferRef
         let all_refs_ref = borrow_global_mut<DelegatedRefs>(@BullPump);
-        all_refs_ref.refs.add(fa_obj_addr, transfer_ref);
+        all_refs_ref.refs.add(fa_obj_addr, fungible_asset_refs);
     }
 
     /// Public function to buy tokens from the bonding curve pool.
@@ -118,7 +149,9 @@ module BullPump::bonding_curve_pool {
 
         // Get the delegated TransferRef for the FA object.
         let all_refs_ref = borrow_global<DelegatedRefs>(@BullPump);
-        let transfer_ref = all_refs_ref.refs.borrow(fa_obj_addr);
+        let fa_refs = all_refs_ref.refs.borrow(fa_obj_addr);
+        let burn_ref = &fa_refs.burn_ref;
+        let transfer_ref = &fa_refs.transfer_ref;
 
         // Math for bonding curve
         let x = coin::value(&pool.apt_reserves) + VIRTUAL_APT_RESERVES;
@@ -153,8 +186,84 @@ module BullPump::bonding_curve_pool {
         if (coin::value(&pool.apt_reserves) >= GRADUATION_THRESHOLD) {
             pool.is_graduated = true;
             // TODO: Implement logic to burn remaining tokens and create a DEX pool.
+            let pool_store = primary_fungible_store::ensure_primary_store_exists(@BullPump, pool.fa_object);
+            let remaining_balance = fungible_asset::balance(pool_store);
 
-        }
+            if (remaining_balance > 0) {
+
+                // Withdraw all remaining tokens into a temporary object
+                let remaining_tokens = fungible_asset::withdraw_with_ref(transfer_ref, pool_store, remaining_balance);
+
+                // Get the BurnerRef for this specific FA (you would have stored this when you created it)
+                // Burn them permanently!
+                fungible_asset::burn(burn_ref, remaining_tokens);
+            }
+        };
+
+        // Emit event
+        event::emit<TokenPurchaseEvent>(
+            TokenPurchaseEvent {
+                buyer: buyer_addr,
+                fa_object: fa_obj_addr,
+                apt_in: apt_in_for_curve,
+                tokens_out,
+            }
+        );
+    }
+
+    public entry fun sell_tokens(seller: &signer, fa_obj_addr: address, token_amount: u64) acquires AllPools, DelegatedRefs {
+        let all_pools_ref = borrow_global_mut<AllPools>(@BullPump);
+        assert!(all_pools_ref.pools.contains(fa_obj_addr), EPOOL_NOT_FOUND);
+
+        let pool = all_pools_ref.pools.borrow_mut(fa_obj_addr);
+        assert!(!pool.is_graduated, EPOOL_IS_GRADUATED);
+        assert!(token_amount > 0, EZERO_INPUT_AMOUNT);
+
+        // Get the delegated TransferRef and BurnRef for the FA object.
+        let all_refs_ref = borrow_global_mut<DelegatedRefs>(@BullPump);
+        let fa_refs = all_refs_ref.refs.borrow(fa_obj_addr);
+        let transfer_ref = &fa_refs.transfer_ref;
+
+        // Ensure seller's store exists
+        let seller_addr = signer::address_of(seller);
+        let seller_store = primary_fungible_store::ensure_primary_store_exists(seller_addr, pool.fa_object);
+
+        // Withdraw tokens from seller
+        let tokens_in = fungible_asset::withdraw_with_ref(transfer_ref, seller_store, token_amount);
+
+        // Math for bonding curve
+        let x = coin::value(&pool.apt_reserves) + VIRTUAL_APT_RESERVES;
+
+        // Ensure pool's store exists and get the current balance
+        let pool_store = primary_fungible_store::ensure_primary_store_exists(@BullPump, pool.fa_object);
+
+        // Get token supply
+        let y = fungible_asset::balance(pool_store);
+
+        // Calculate APT to send out using the formula:
+        let apt_out = (((x as u128) * (token_amount as u128)) / ((y as u128) + (token_amount as u128))) as u64;
+
+        // Ensure the pool has enough APT reserves
+        assert!(coin::value(&pool.apt_reserves) >= apt_out, EZERO_INPUT_AMOUNT);
+
+        // Deposit tokens into pool's store
+        fungible_asset::deposit(pool_store, tokens_in);
+
+        // Withdraw APT from pool reserves to send to seller
+        let apt_to_send = coin::extract(&mut pool.apt_reserves, apt_out);
+
+        // Send APT to seller
+        coin::deposit(seller_addr, apt_to_send);
+
+        // Emit event
+        event::emit<TokenSaleEvent>(
+            TokenSaleEvent {    
+                seller: seller_addr,
+                fa_object: fa_obj_addr,
+                tokens_in: token_amount,
+                apt_out,
+            }
+        );
     }
 
     #[view]

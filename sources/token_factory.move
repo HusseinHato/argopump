@@ -28,6 +28,8 @@ module BullPump::token_factory {
     const EMINT_LIMIT_REACHED: u64 = 6;
     /// Not Enough Balance
     const ENOT_ENOUGH_BALANCE: u64 = 7;
+    /// Cannot Be Zero
+    const ECANNOT_BE_ZERO: u64 = 8;
 
 
     /// Default to mint 0 amount to creator when creating FA
@@ -45,7 +47,7 @@ module BullPump::token_factory {
     struct CreateFAEvent has store, drop {
         creator_addr: address,
         fa_obj: Object<Metadata>,
-        max_supply: Option<u128>,
+        max_supply: u128,
         name: String,
         symbol: String,
         decimals: u8,
@@ -149,6 +151,7 @@ module BullPump::token_factory {
         // decimals: u8,
         icon_uri: String,
         project_uri: String,
+        amount_creator_buy: Option<u64>
     ) acquires Registry {
         let sender_addr = signer::address_of(sender);
 
@@ -169,6 +172,7 @@ module BullPump::token_factory {
         let mint_ref = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
         let mint_ref_copy = fungible_asset::generate_mint_ref(fa_obj_constructor_ref);
         let burn_ref = fungible_asset::generate_burn_ref(fa_obj_constructor_ref);
+        let burn_ref_for_bonding_curve = fungible_asset::generate_burn_ref(fa_obj_constructor_ref);
         let transfer_ref = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
         let transfer_ref_for_bonding_curve = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
 
@@ -176,6 +180,7 @@ module BullPump::token_factory {
             sender,
             fa_obj,
             transfer_ref_for_bonding_curve,
+            burn_ref_for_bonding_curve
         );
 
         move_to(
@@ -202,11 +207,22 @@ module BullPump::token_factory {
         let registry = borrow_global_mut<Registry>(@BullPump);
         registry.fa_objects.push_back(fa_obj);
 
+        // if creator want to buy some tokens at the beginning
+        if (amount_creator_buy.is_some()) {
+            let amount = amount_creator_buy.extract();
+            assert!(amount > 0, ECANNOT_BE_ZERO);
+            BullPump::bonding_curve_pool::buy_tokens(
+                sender,
+                object::object_address(&fa_obj),
+                amount
+            );
+        };
+
         event::emit(
             CreateFAEvent {
                 creator_addr: sender_addr,
                 fa_obj,
-                max_supply: option::some(INITIAL_BONDING_CURVE_SUPPLY),
+                max_supply: INITIAL_BONDING_CURVE_SUPPLY,
                 name,
                 symbol,
                 decimals: DEFAULT_DECIMALS,
@@ -215,10 +231,11 @@ module BullPump::token_factory {
                 mint_fee_per_smallest_unit_of_fa: DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA
             }
         );
+
     }
 
     // Mint fungible asset, anyone with enough mint fee and has not reached mint limit can mint FA
-    public entry fun mint_fa(
+    fun mint_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
     ) acquires FAController, FAConfig, Config {
         let total_mint_fee = get_mint_fee(fa_obj, amount);
@@ -226,7 +243,7 @@ module BullPump::token_factory {
         mint_fa_internal(sender, fa_obj, amount, total_mint_fee);
     }
 
-    public entry fun burn_fa(
+    fun burn_fa(
         sender: &signer, fa_obj: Object<Metadata>, amount: u64
     ) acquires FAController {
         let sender_addr = signer::address_of(sender);
@@ -277,20 +294,29 @@ module BullPump::token_factory {
 
     #[view]
     /// Get FA Balance of an address
-    public fun get_balance_of_user(fa_obj: Object<Metadata>, addr: address): u64 {
+    fun get_balance_of_user(fa_obj: Object<Metadata>, addr: address): u64 {
+        primary_fungible_store::balance(addr, fa_obj)
+    }
+
+    #[view]
+    /// Get FA Balance of an address by FA object address
+    public fun get_balance_of_user_by_fa_object_address(fa_obj_address: address, addr: address): u64 {
+        let fa_obj = object::address_to_object<Metadata>(fa_obj_address);
         primary_fungible_store::balance(addr, fa_obj)
     }
 
     #[view]
     // get fungible asset Metadata
-    public fun get_fa_object_metadata(fa_obj: Object<Metadata>): (String, String, u8, Option<u128>, u64) {
+    public fun get_fa_object_metadata(fa_obj_address: address): (String, String, String, String, u8, Option<u128>) {
+        let fa_obj = object::address_to_object<Metadata>(fa_obj_address);
         let name = fungible_asset::name(fa_obj);
         let symbol = fungible_asset::symbol(fa_obj);
+        let icon_uri = fungible_asset::icon_uri(fa_obj);
+        let project_uri = fungible_asset::project_uri(fa_obj);
         let decimals = fungible_asset::decimals(fa_obj);
         let max_supply = fungible_asset::maximum(fa_obj);
-        let circulating_supply = fungible_asset::balance(fa_obj);
 
-        (name, symbol, decimals, max_supply, circulating_supply)
+        (name, symbol, icon_uri, project_uri, decimals, max_supply)
     }
 
     #[view]
@@ -387,11 +413,24 @@ module BullPump::token_factory {
             string::utf8(b"TST"),
             string::utf8(b"icon_url"),
             string::utf8(b"project_url"),
+            option::none()
         );
 
         let registry = get_registry();
         let fa_1 = registry[registry.length() - 1];
         assert!(fungible_asset::supply(fa_1) == option::some(INITIAL_BONDING_CURVE_SUPPLY), 1);
+
+        let (name, symbol, icon_uri, project_uri, decimals, max_supply) = get_fa_object_metadata(
+            get_fa_object_address(fa_1)
+        );
+
+        debug::print(&name);
+        debug::print(&symbol);
+        debug::print(&icon_uri);
+        debug::print(&project_uri);
+        debug::print(&decimals);
+        debug::print(&max_supply);
+
     }
 
     #[test_only]
@@ -408,7 +447,7 @@ module BullPump::token_factory {
     use aptos_framework::coin;
 
     #[test(aptos_framework = @0x1, sender = @BullPump, alice = @0x2)]
-    fun test_set_up(
+    fun test_happy_path(
         sender: &signer,
         aptos_framework: &signer,
         alice: &signer
@@ -428,6 +467,7 @@ module BullPump::token_factory {
             string::utf8(b"TST2"),
             string::utf8(b"icon_url"),
             string::utf8(b"project_url"),
+            option::none()
         );
 
         let registry = get_registry();
@@ -452,6 +492,35 @@ module BullPump::token_factory {
         debug::print(&bonding_curve_pool::get_token_balance(alice_addr, fa_2_address));
         debug::print(&bonding_curve_pool::get_token_balance(creator_addr, fa_2_address));
         debug::print(&bonding_curve_pool::get_apt_reserves(fa_2_address));
+
+        // Clean up
+        bonding_curve_pool::sell_tokens(
+            alice,
+            fa_2_address,
+            bonding_curve_pool::get_token_balance(alice_addr, fa_2_address)
+        );
+
+        debug::print(&string::utf8(b"alice TST2 balance after sell: "));
+        debug::print(&bonding_curve_pool::get_token_balance(alice_addr, fa_2_address));
+        debug::print(&bonding_curve_pool::get_token_balance(creator_addr, fa_2_address));
+        debug::print(&bonding_curve_pool::get_apt_reserves(fa_2_address));
+
+        create_fa(
+            alice,
+            string::utf8(b"Test3"),
+            string::utf8(b"TST3"),
+            string::utf8(b"icon_url"),
+            string::utf8(b"project_url"),
+            option::some(1_00000000) // 1_00000000 oapt = 1 APT
+        );
+
+        let registry = get_registry();
+        let fa_3 = registry[registry.length() - 1];
+        let fa_3_address = get_fa_object_address(fa_3);
+
+        debug::print(&string::utf8(b"alice TST3 balance after create: "));
+        debug::print(&get_balance_of_user_by_fa_object_address(fa_3_address, alice_addr));
+        debug::print(&bonding_curve_pool::get_apt_reserves(fa_3_address));
 
         coin::destroy_burn_cap(burn_cap);
         coin::destroy_mint_cap(mint_cap);

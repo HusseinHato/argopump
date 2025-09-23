@@ -2,6 +2,7 @@
 name = "bullpump"
 version = "1.0.0"
 authors = []
+upgrade-policy = "compatible"
 
 [addresses]
 BullPump = "0x4660906d4ed4062029a19e989e51c814aa5b0711ef0ba0433b5f7487cb03b257"
