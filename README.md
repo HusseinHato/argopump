@@ -91,7 +91,7 @@ Manages token graduation from bonding curve to liquidity pools.
 
 ---
 
-### 4. Basic AMM (Liquidity Pools)
+### 4. Basic AMM (Liquidity Pools) (TAPP Exchange Integration)
 Simple constant product AMM for token swaps and liquidity provision.
 
 #### Features:
@@ -127,7 +127,7 @@ Simple constant product AMM for token swaps and liquidity provision.
 
 ---
 
-### 5. Router & Hook System
+### 5. Router & Hook System (TAPP Exchange Integration) (NOT IMPLEMENTED)
 Unified entry point for all DEX operations with extensible hook architecture.
 
 #### Features:
@@ -161,7 +161,7 @@ Unified entry point for all DEX operations with extensible hook architecture.
 
 ---
 
-### 6. Position NFTs
+### 6. Position NFTs (TAPP Exchange Integration) (NOT IMPLEMENTED)
 NFT-based liquidity position tracking system.
 
 #### Features:
@@ -182,7 +182,7 @@ NFT-based liquidity position tracking system.
 
 ---
 
-### 7. Vault System
+### 7. Vault System (TAPP Exchange Integration) (NOT IMPLEMENTED)
 Time-locked and insurance vault implementations.
 
 #### Features:
@@ -217,7 +217,7 @@ Time-locked and insurance vault implementations.
 
 ---
 
-### 8. Advanced AMM
+### 8. Advanced AMM (TAPP Exchange Integration) (NOT IMPLEMENTED)
 Extended AMM with campaign-based incentive system.
 
 #### Features:
@@ -243,7 +243,7 @@ Extended AMM with campaign-based incentive system.
 
 ---
 
-### 9. Hook Factory
+### 9. Hook Factory (TAPP Exchange Integration) (NOT IMPLEMENTED)
 Abstraction layer for multiple pool implementations.
 
 #### Features:
@@ -415,7 +415,7 @@ bonding_curve_pool::buy_tokens(buyer, fa_object_addr, 1_00000000); // 1 APT
 bonding_curve_pool::sell_tokens(seller, fa_object_addr, token_amount);
 ```
 
-### Adding Liquidity (Post-Graduation):
+### Adding Liquidity (Post-Graduation) Integrated with TAPP Exchange:
 ```move
 // Via router
 router::add_liquidity(sender, args);
@@ -435,22 +435,13 @@ router::swap(sender, args);
 
 - **AptosFramework**: Core Aptos functionality
 - **AptosTokenObjects**: NFT standard implementation
+- **TAPP Exchange Hooks**: DEX Interactions
 
 ---
 
 ## 📄 License
 
 See Move.toml for package details and upgrade policy: `compatible`
-
----
-
-## 🤝 Contributing
-
-This is an extensible platform. To add custom hooks:
-1. Implement your hook module
-2. Add hook type constant to `hook_factory`
-3. Route operations in `hook_factory` functions
-4. Register in router system
 
 ---
 
