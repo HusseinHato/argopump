@@ -127,7 +127,7 @@ Simple constant product AMM for token swaps and liquidity provision.
 
 ---
 
-### 5. Router & Hook System (TAPP Exchange Integration) (NOT IMPLEMENTED)
+### 5. Router & Hook System (TAPP Exchange Integration)
 Unified entry point for all DEX operations with extensible hook architecture.
 
 #### Features:
@@ -161,7 +161,7 @@ Unified entry point for all DEX operations with extensible hook architecture.
 
 ---
 
-### 6. Position NFTs (TAPP Exchange Integration) (NOT IMPLEMENTED)
+### 6. Position NFTs (TAPP Exchange Integration)
 NFT-based liquidity position tracking system.
 
 #### Features:
@@ -243,7 +243,7 @@ Extended AMM with campaign-based incentive system.
 
 ---
 
-### 9. Hook Factory (TAPP Exchange Integration) (NOT IMPLEMENTED)
+### 9. Hook Factory (TAPP Exchange Integration)
 Abstraction layer for multiple pool implementations.
 
 #### Features:
