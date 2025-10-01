@@ -1,4 +1,13 @@
+
 # ArgoPump - Token Launch & DEX Platform on Aptos
+
+<div align="center">
+
+![ArgoPump Banner](https://i.pinimg.com/736x/8f/d5/b9/8fd5b957fcce04f15127e7b363254ee8.jpg)
+
+**The Ultimate Bonding Curve Token Launchpad on Aptos Blockchain**
+
+</div>
 
 ArgoPump is a comprehensive DeFi platform on Aptos that combines token creation, bonding curve mechanics, automated market making (AMM), and advanced liquidity management features.
 
