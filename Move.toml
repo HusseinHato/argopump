@@ -1,11 +1,11 @@
 [package]
-name = "bullpump"
+name = "argopump"
 version = "1.0.0"
 authors = []
-upgrade-policy = "compatible"
+upgrade_policy = "compatible"
 
 [addresses]
-BullPump = "0x4660906d4ed4062029a19e989e51c814aa5b0711ef0ba0433b5f7487cb03b257"
+ArgoPump = "0xf937c2d4a8ed5d30141b4911593543dd5975eab3a0e6d75105783205996e516f"
 
 [dev-addresses]
 
@@ -13,5 +13,11 @@ BullPump = "0x4660906d4ed4062029a19e989e51c814aa5b0711ef0ba0433b5f7487cb03b257"
 git = "https://github.com/aptos-labs/aptos-framework.git"
 rev = "mainnet"
 subdir = "aptos-framework"
+
+[dependencies.AptosTokenObjects]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet" 
+subdir = "aptos-move/framework/aptos-token-objects" 
+
 
 [dev-dependencies]

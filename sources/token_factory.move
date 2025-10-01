@@ -1,4 +1,4 @@
-module BullPump::token_factory {
+module ArgoPump::token_factory {
     use std::option::{Self, Option};
     use std::signer;
     use std::string::String;
@@ -13,6 +13,7 @@ module BullPump::token_factory {
     use aptos_framework::fungible_asset::{Self, Metadata};
     use aptos_framework::object::{Self, Object, ObjectCore};
     use aptos_framework::primary_fungible_store;
+    use aptos_framework::account::{Self, SignerCapability};
 
     /// Only admin can update creator
     const EONLY_ADMIN_CAN_UPDATE_CREATOR: u64 = 1;
@@ -37,11 +38,13 @@ module BullPump::token_factory {
     /// Default mint fee per smallest unit of FA denominated in oapt (smallest unit of APT, i.e. 1e-8 APT)
     const DEFAULT_MINT_FEE_PER_SMALLEST_UNIT_OF_FA: u64 = 0;
     /// Address of Bonding Curve contract
-    const BONDING_CURVE_POOL_ADDRESS: address = @BullPump;
+    const BONDING_CURVE_POOL_ADDRESS: address = @ArgoPump;
     /// Initial Supply of the FA created
-    const INITIAL_BONDING_CURVE_SUPPLY: u128 = 1_000_000_000_00000000; // 1 billion tokens with 8 decimal places
+    const INITIAL_BONDING_CURVE_SUPPLY: u128 = 800_000_000_00000000; // 800 million tokens with 8 decimal places
     /// Default number of decimal places for the FA created
     const DEFAULT_DECIMALS: u8 = 8;
+    /// Reserved FA for liquidity pool
+    const RESERVED_FA_FOR_LIQUDITY_POOL: u128 = 200_000_000_00000000; // 200 million tokens with 8 decimal places
 
     #[event]
     struct CreateFAEvent has store, drop {
@@ -97,6 +100,16 @@ module BullPump::token_factory {
         mint_fee_collector_addr: address
     }
 
+    /// Resource to store the FA creator resource account address
+    struct FACreatorManager has key {
+        resource_account: address,
+    }
+
+    /// Resource to store the signer capability at resource account
+    struct ResourceAccountCap has key {
+        signer_cap: SignerCapability,
+    }
+
     /// If you deploy the module under an object, sender is the object's signer
     /// If you deploy the moduelr under your own account, sender is your account's signer
     fun init_module(sender: &signer) {
@@ -109,6 +122,26 @@ module BullPump::token_factory {
                 mint_fee_collector_addr: signer::address_of(sender)
             }
         );
+        
+        // Initialize resource account for FA creation
+        initialize_fa_creator(sender);
+    }
+
+    /// Initialize the FA creator resource account
+    /// This creates a separate resource account to manage FA object creation
+    fun initialize_fa_creator(sender: &signer) {
+        let sender_addr = signer::address_of(sender);
+        if (!exists<FACreatorManager>(sender_addr)) {
+            // Create a resource account for FA creation
+            let (resource_signer, signer_cap) = account::create_resource_account(sender, b"fa_creator");
+            let resource_addr = signer::address_of(&resource_signer);
+            
+            // Store capability at resource account
+            move_to(&resource_signer, ResourceAccountCap { signer_cap });
+            
+            // Store resource account address at ArgoPump
+            move_to(sender, FACreatorManager { resource_account: resource_addr });
+        }
     }
 
     // ================================= Entry Functions ================================= //
@@ -116,14 +149,14 @@ module BullPump::token_factory {
     /// Set pending admin of the contract, then pending admin can call accept_admin to becom admin
     public entry fun set_pending_admin(sender: &signer, new_admin: address) acquires Config {
         let sender_addr = signer::address_of(sender);
-        let config = borrow_global_mut<Config>(@BullPump);
+        let config = borrow_global_mut<Config>(@ArgoPump);
         assert!(is_admin(config, sender_addr), EONLY_ADMIN_CAN_SET_PENDING_ADMIN);
         config.pending_admin_addr = option::some(new_admin);
     }
 
     public entry fun accept_admin(sender: &signer) acquires Config {
         let sender_addr = signer::address_of(sender);
-        let config = borrow_global_mut<Config>(@BullPump);
+        let config = borrow_global_mut<Config>(@ArgoPump);
         assert!(
             config.pending_admin_addr == option::some(sender_addr), ENOT_PENDING_ADMIN
         );
@@ -134,7 +167,7 @@ module BullPump::token_factory {
     /// Update mint fee collector address
     public entry fun update_mint_fee_collector(sender: &signer, new_mint_fee_collector: address) acquires Config {
         let sender_addr = signer::address_of(sender);
-        let config = borrow_global_mut<Config>(@BullPump);
+        let config = borrow_global_mut<Config>(@ArgoPump);
         assert!(
             is_admin(config, sender_addr), EONLY_ADMIN_CAN_UPDATE_MINT_FEE_COLLECTOR
         );
@@ -152,15 +185,21 @@ module BullPump::token_factory {
         icon_uri: String,
         project_uri: String,
         amount_creator_buy: Option<u64>
-    ) acquires Registry {
+    ) acquires Registry, FACreatorManager, ResourceAccountCap {
         let sender_addr = signer::address_of(sender);
 
-        let fa_obj_constructor_ref = &object::create_sticky_object(@BullPump);
+        // Get the resource account signer to create FA objects
+        let manager = borrow_global<FACreatorManager>(@ArgoPump);
+        let resource_cap = borrow_global<ResourceAccountCap>(manager.resource_account);
+        let resource_signer = account::create_signer_with_capability(&resource_cap.signer_cap);
+
+        // Create FA object under resource account instead of @ArgoPump
+        let fa_obj_constructor_ref = &object::create_sticky_object(signer::address_of(&resource_signer));
         let fa_obj_signer = &object::generate_signer(fa_obj_constructor_ref);
 
         primary_fungible_store::create_primary_store_enabled_fungible_asset(
             fa_obj_constructor_ref,
-            option::some(INITIAL_BONDING_CURVE_SUPPLY),
+            option::some(INITIAL_BONDING_CURVE_SUPPLY + RESERVED_FA_FOR_LIQUDITY_POOL),
             name,
             symbol,
             DEFAULT_DECIMALS,
@@ -176,7 +215,7 @@ module BullPump::token_factory {
         let transfer_ref = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
         let transfer_ref_for_bonding_curve = fungible_asset::generate_transfer_ref(fa_obj_constructor_ref);
 
-        BullPump::bonding_curve_pool::initialize_pool(
+        ArgoPump::bonding_curve_pool::initialize_pool(
             sender,
             fa_obj,
             transfer_ref_for_bonding_curve,
@@ -188,7 +227,7 @@ module BullPump::token_factory {
             FAController { mint_ref, burn_ref, transfer_ref }
         );
 
-        let minted_tokens = fungible_asset::mint(&mint_ref_copy, (INITIAL_BONDING_CURVE_SUPPLY as u64));
+        let minted_tokens = fungible_asset::mint(&mint_ref_copy, (INITIAL_BONDING_CURVE_SUPPLY + RESERVED_FA_FOR_LIQUDITY_POOL) as u64);
 
         let pooL_store = primary_fungible_store::ensure_primary_store_exists(
             BONDING_CURVE_POOL_ADDRESS,
@@ -204,14 +243,14 @@ module BullPump::token_factory {
             }
         );
 
-        let registry = borrow_global_mut<Registry>(@BullPump);
+        let registry = borrow_global_mut<Registry>(@ArgoPump);
         registry.fa_objects.push_back(fa_obj);
 
         // if creator want to buy some tokens at the beginning
         if (amount_creator_buy.is_some()) {
             let amount = amount_creator_buy.extract();
             assert!(amount > 0, ECANNOT_BE_ZERO);
-            BullPump::bonding_curve_pool::buy_tokens(
+            ArgoPump::bonding_curve_pool::buy_tokens(
                 sender,
                 object::object_address(&fa_obj),
                 amount
@@ -256,7 +295,7 @@ module BullPump::token_factory {
     #[view]
     /// get all fungible assets created using this contract
     public fun get_registry(): vector<Object<Metadata>> acquires Registry {
-        let registry = borrow_global<Registry>(@BullPump);
+        let registry = borrow_global<Registry>(@ArgoPump);
         registry.fa_objects
     }
 
@@ -274,21 +313,21 @@ module BullPump::token_factory {
     #[view]
     /// Get contract admin
     public fun get_admin(): address acquires Config {
-        let config = borrow_global<Config>(@BullPump);
+        let config = borrow_global<Config>(@ArgoPump);
         config.admin_addr
     }
 
     #[view]
     /// Get contract pending admin
     public fun get_pending_admin(): Option<address> acquires Config {
-        let config = borrow_global<Config>(@BullPump);
+        let config = borrow_global<Config>(@ArgoPump);
         config.pending_admin_addr
     }
 
     #[view]
     /// Get mint fee collector address
     public fun get_mint_fee_collector(): address acquires Config {
-        let config = borrow_global<Config>(@BullPump);
+        let config = borrow_global<Config>(@ArgoPump);
         config.mint_fee_collector_addr
     }
 
@@ -331,8 +370,8 @@ module BullPump::token_factory {
     fun is_admin(config: &Config, sender: address): bool {
         if (sender == config.admin_addr) { true }
         else {
-            if (object::is_object(@BullPump)) {
-                let obj = object::address_to_object<ObjectCore>(@BullPump);
+            if (object::is_object(@ArgoPump)) {
+                let obj = object::address_to_object<ObjectCore>(@ArgoPump);
                 object::is_owner(obj, sender)
             } else { false }
         }
@@ -389,7 +428,7 @@ module BullPump::token_factory {
     /// Pay for mint
     fun pay_for_mint(sender: &signer, total_mint_fee: u64) acquires Config {
         if (total_mint_fee > 0) {
-            let config = borrow_global<Config>(@BullPump);
+            let config = borrow_global<Config>(@ArgoPump);
             aptos_account::transfer(
                 sender, config.mint_fee_collector_addr, total_mint_fee
             )
@@ -398,11 +437,11 @@ module BullPump::token_factory {
 
     // ================================= Unit Tests ================================== //
 
-    #[test(sender = @BullPump)]
+    #[test(sender = @ArgoPump)]
     fun test_create_fa(
         // aptos_framework: &signer,
         sender: &signer
-    ) acquires Registry {
+    ) acquires Registry, FACreatorManager, ResourceAccountCap {
 
         init_module(sender);
 
@@ -418,7 +457,7 @@ module BullPump::token_factory {
 
         let registry = get_registry();
         let fa_1 = registry[registry.length() - 1];
-        assert!(fungible_asset::supply(fa_1) == option::some(INITIAL_BONDING_CURVE_SUPPLY), 1);
+        assert!(fungible_asset::supply(fa_1) == option::some(INITIAL_BONDING_CURVE_SUPPLY + RESERVED_FA_FOR_LIQUDITY_POOL), 1);
 
         let (name, symbol, icon_uri, project_uri, decimals, max_supply) = get_fa_object_metadata(
             get_fa_object_address(fa_1)
@@ -434,9 +473,7 @@ module BullPump::token_factory {
     }
 
     #[test_only]
-    use BullPump::bonding_curve_pool::{Self};
-    #[test_only]
-    use aptos_framework::account;
+    use ArgoPump::bonding_curve_pool::{Self};
     #[test_only]
     use std::debug;
 
@@ -446,12 +483,12 @@ module BullPump::token_factory {
     #[test_only]
     use aptos_framework::coin;
 
-    #[test(aptos_framework = @0x1, sender = @BullPump, alice = @0x2)]
+    #[test(aptos_framework = @0x1, sender = @ArgoPump, alice = @0x2)]
     fun test_happy_path(
         sender: &signer,
         aptos_framework: &signer,
         alice: &signer
-    ) acquires Registry {
+    ) acquires Registry, FACreatorManager, ResourceAccountCap {
 
         let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
 

@@ -1,4 +1,4 @@
-module BullPump::bonding_curve_pool {
+module ArgoPump::bonding_curve_pool {
     use std::signer;
     // use std::error;
     use aptos_framework::coin::{Self, Coin};
@@ -8,13 +8,15 @@ module BullPump::bonding_curve_pool {
     use aptos_std::table::{Self, Table};
     use aptos_framework::primary_fungible_store;
     use aptos_framework::event;
+    // use std::option::{Self};
+    // use aptos_std::bcs_stream;
     // use std::debug;
 
     // Friend module to allow access to initialize_pool function
-    friend BullPump::token_factory;
+    friend ArgoPump::token_factory;
 
     /// Token Factory Address
-    const TOKEN_FACTORY_ADDRESS: address = @BullPump;
+    const TOKEN_FACTORY_ADDRESS: address = @ArgoPump;
 
     /// Virtual APT reserves to stabilize the curve.
     const VIRTUAL_APT_RESERVES: u64 = 28_24_00000000;
@@ -30,7 +32,7 @@ module BullPump::bonding_curve_pool {
     const BASIS_POINTS_DENOMINATOR: u64 = 10_000;
 
     /// Address to collect fees.
-    const TREASURY_ADDRESS: address = @BullPump;
+    const TREASURY_ADDRESS: address = @ArgoPump;
 
     // --- Errors ---
 
@@ -59,6 +61,12 @@ module BullPump::bonding_curve_pool {
         fa_object: address,
         tokens_in: u64,
         apt_out: u64,
+    }
+
+    #[event]
+    struct PoolGraduationEvent has copy, drop, store {
+        fa_object: address,
+        total_apt_reserves: u64,
     }
 
 
@@ -95,13 +103,13 @@ module BullPump::bonding_curve_pool {
         burn_ref: BurnRef
     ) acquires AllPools, DelegatedRefs {
         // Initialize resources if not exists
-        if (!exists<AllPools>(@BullPump)) {
+        if (!exists<AllPools>(@ArgoPump)) {
             move_to(sender, AllPools { pools: table::new() });
             move_to(sender, DelegatedRefs { refs: table::new() });
         };
 
         let fa_obj_addr = object::object_address(&fa_obj);
-        let all_pools_ref = borrow_global_mut<AllPools>(@BullPump);
+        let all_pools_ref = borrow_global_mut<AllPools>(@ArgoPump);
         assert!(!all_pools_ref.pools.contains(fa_obj_addr), EPOOL_ALREADY_EXISTS);
 
         // create new pool
@@ -120,13 +128,13 @@ module BullPump::bonding_curve_pool {
         };
 
         // Store the delegated TransferRef
-        let all_refs_ref = borrow_global_mut<DelegatedRefs>(@BullPump);
+        let all_refs_ref = borrow_global_mut<DelegatedRefs>(@ArgoPump);
         all_refs_ref.refs.add(fa_obj_addr, fungible_asset_refs);
     }
 
     /// Public function to buy tokens from the bonding curve pool.
     public entry fun buy_tokens(buyer: &signer, fa_obj_addr: address, amount: u64) acquires AllPools, DelegatedRefs {
-        let all_pools_ref = borrow_global_mut<AllPools>(@BullPump);
+        let all_pools_ref = borrow_global_mut<AllPools>(@ArgoPump);
         assert!(all_pools_ref.pools.contains(fa_obj_addr), EPOOL_NOT_FOUND);
 
         let pool = all_pools_ref.pools.borrow_mut(fa_obj_addr);
@@ -148,9 +156,8 @@ module BullPump::bonding_curve_pool {
         let apt_in_for_curve = coin::value(&apt_for_curve);
 
         // Get the delegated TransferRef for the FA object.
-        let all_refs_ref = borrow_global<DelegatedRefs>(@BullPump);
+        let all_refs_ref = borrow_global<DelegatedRefs>(@ArgoPump);
         let fa_refs = all_refs_ref.refs.borrow(fa_obj_addr);
-        let burn_ref = &fa_refs.burn_ref;
         let transfer_ref = &fa_refs.transfer_ref;
 
         // Math for bonding curve
@@ -158,7 +165,7 @@ module BullPump::bonding_curve_pool {
 
         // Ensure pool's store exists and get the current balance
         let pool_store = primary_fungible_store::ensure_primary_store_exists(
-            @BullPump,
+            @ArgoPump,
             pool.fa_object
         );
 
@@ -172,7 +179,7 @@ module BullPump::bonding_curve_pool {
         let buyer_addr = signer::address_of(buyer);
 
         // Transfer tokens from pool to buyer
-        let from_store = primary_fungible_store::ensure_primary_store_exists(@BullPump, pool.fa_object);
+        let from_store = primary_fungible_store::ensure_primary_store_exists(@ArgoPump, pool.fa_object);
 
         let to_store = primary_fungible_store::ensure_primary_store_exists(buyer_addr, pool.fa_object);
 
@@ -185,19 +192,25 @@ module BullPump::bonding_curve_pool {
         // Check for graduation
         if (coin::value(&pool.apt_reserves) >= GRADUATION_THRESHOLD) {
             pool.is_graduated = true;
-            // TODO: Implement logic to burn remaining tokens and create a DEX pool.
-            let pool_store = primary_fungible_store::ensure_primary_store_exists(@BullPump, pool.fa_object);
-            let remaining_balance = fungible_asset::balance(pool_store);
+            
+            // Emit graduation event
+            event::emit<PoolGraduationEvent>(
+                PoolGraduationEvent {
+                    fa_object: fa_obj_addr,
+                    total_apt_reserves: coin::value(&pool.apt_reserves),
+                }
+            );
 
-            if (remaining_balance > 0) {
-
-                // Withdraw all remaining tokens into a temporary object
-                let remaining_tokens = fungible_asset::withdraw_with_ref(transfer_ref, pool_store, remaining_balance);
-
-                // Get the BurnerRef for this specific FA (you would have stored this when you created it)
-                // Burn them permanently!
-                fungible_asset::burn(burn_ref, remaining_tokens);
-            }
+            // Extract APT reserves to pass to graduation handler
+            let apt_for_lp = coin::extract_all(&mut pool.apt_reserves);
+            
+            // Call graduation handler to create LP and add liquidity
+            // Note: This requires the graduation handler to create its own pool signer
+            ArgoPump::graduation_handler::handle_graduation(
+                pool.fa_object,
+                apt_for_lp,
+                transfer_ref
+            );
         };
 
         // Emit event
@@ -212,7 +225,7 @@ module BullPump::bonding_curve_pool {
     }
 
     public entry fun sell_tokens(seller: &signer, fa_obj_addr: address, token_amount: u64) acquires AllPools, DelegatedRefs {
-        let all_pools_ref = borrow_global_mut<AllPools>(@BullPump);
+        let all_pools_ref = borrow_global_mut<AllPools>(@ArgoPump);
         assert!(all_pools_ref.pools.contains(fa_obj_addr), EPOOL_NOT_FOUND);
 
         let pool = all_pools_ref.pools.borrow_mut(fa_obj_addr);
@@ -220,7 +233,7 @@ module BullPump::bonding_curve_pool {
         assert!(token_amount > 0, EZERO_INPUT_AMOUNT);
 
         // Get the delegated TransferRef and BurnRef for the FA object.
-        let all_refs_ref = borrow_global_mut<DelegatedRefs>(@BullPump);
+        let all_refs_ref = borrow_global_mut<DelegatedRefs>(@ArgoPump);
         let fa_refs = all_refs_ref.refs.borrow(fa_obj_addr);
         let transfer_ref = &fa_refs.transfer_ref;
 
@@ -235,7 +248,7 @@ module BullPump::bonding_curve_pool {
         let x = coin::value(&pool.apt_reserves) + VIRTUAL_APT_RESERVES;
 
         // Ensure pool's store exists and get the current balance
-        let pool_store = primary_fungible_store::ensure_primary_store_exists(@BullPump, pool.fa_object);
+        let pool_store = primary_fungible_store::ensure_primary_store_exists(@ArgoPump, pool.fa_object);
 
         // Get token supply
         let y = fungible_asset::balance(pool_store);
@@ -272,7 +285,7 @@ module BullPump::bonding_curve_pool {
         account: address,
         fa_obj_addr: address
     ): u64 acquires AllPools {
-        let all_pools = borrow_global<AllPools>(@BullPump);
+        let all_pools = borrow_global<AllPools>(@ArgoPump);
         assert!(all_pools.pools.contains(fa_obj_addr), EPOOL_NOT_FOUND);
 
         let pool = all_pools.pools.borrow(fa_obj_addr);
@@ -284,7 +297,7 @@ module BullPump::bonding_curve_pool {
     #[view]
     /// Get the APT reserves of a specific pool
     public fun get_apt_reserves(fa_obj_addr: address): u64 acquires AllPools {
-        let all_pools = borrow_global<AllPools>(@BullPump);
+        let all_pools = borrow_global<AllPools>(@ArgoPump);
         assert!(all_pools.pools.contains(fa_obj_addr), EPOOL_NOT_FOUND);
         let pool = all_pools.pools.borrow(fa_obj_addr);
         coin::value(&pool.apt_reserves)
